@@ -3,14 +3,17 @@ __pycache__/
 *.pyc
 .venv/
 
-# Data & outputs (DO NOT push)
+# Data (raw + processed)
 data/
-data_balanced/
+data_preprocessed/
+
+# Results, logs, outputs
+results/
 outputs/
 runs/
 checkpoints/
 
-# Model weights & large artifacts
+# Large artifacts
 *.pth
 *.pt
 *.onnx
@@ -19,3 +22,6 @@ checkpoints/
 *.7z
 *.rar
 *.mp4
+
+# Temporary files
+allfiles.txt
