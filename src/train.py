@@ -1,109 +1,210 @@
+# src/train.py
 import argparse
+from pathlib import Path
+import json
+import random
+
 import torch
-import torch.nn.functional as F
-import torch.nn.utils.prune as prune
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
-from model import DualBranchSwinCNNClassifier
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Subset
+import numpy as np
 
-# If the original dual-Swin model is needed as teacher, ensure its class is accessible:
+# ------- try to import your dataset, fallback to ImageFolder -------
 try:
-    from model import DualBranchSwinTinyClassifier  # original full model architecture
-except ImportError:
-    DualBranchSwinTinyClassifier = None
+    from dataset import MicroplasticsDualInputDataset  # preferred
+    HAS_CUSTOM_DS = True
+except Exception:
+    HAS_CUSTOM_DS = False
+    from torchvision import datasets, transforms
 
+# ------- resolve a model class from model.py dynamically -------
+def resolve_model_class():
+    import importlib
+    m = importlib.import_module("model")
+    candidate_names = [
+        "DualBranchSwinTinyClassifier",   # if you still have it
+        "TinyStudentCNN",                 # lightweight student we used
+        "MobileNetV3SmallClassifier",     # other light options
+        "EfficientNetLiteClassifier",
+        "SimpleCNN",
+    ]
+    for name in candidate_names:
+        if hasattr(m, name):
+            return getattr(m, name), name
+    # as a last resort, look for any nn.Module subclass
+    for attr in dir(m):
+        obj = getattr(m, attr)
+        if isinstance(obj, type) and issubclass(obj, torch.nn.Module) and obj is not torch.nn.Module:
+            return obj, attr
+    raise ImportError("No usable model class found in model.py")
 
-def train_model(args):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# ------- reproducibility -------
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
-    # ----------------------------
-    # Dataset & DataLoader setup
-    # ----------------------------
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),   # Resize images to 224x224
-        transforms.ToTensor()
-    ])
+# ------- make loaders (works with custom DS or ImageFolder) -------
+def make_loaders(data_dir: Path, batch_size: int = 16, val_ratio: float = 0.2, num_workers: int = 2):
+    if HAS_CUSTOM_DS:
+        full = MicroplasticsDualInputDataset(str(data_dir))
+        # expect __getitem__ -> (x_std, x_clahe, y)
+        labels = [int(full[i][2]) for i in range(len(full))]
+        indices = np.arange(len(full))
+    else:
+        # Fallback using ImageFolder (expects data_dir/algae and data_dir/microplastics)
+        tfm = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            # normalize to ImageNet stats (okay for most pretrained backbones)
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ])
+        full_if = datasets.ImageFolder(str(data_dir), transform=tfm)
+        full = full_if
+        labels = [full.targets[i] for i in range(len(full))]
+        indices = np.arange(len(full))
 
-    # Point to your dataset folders
-    train_dataset = datasets.ImageFolder(root="./data/train", transform=transform)
-    val_dataset = datasets.ImageFolder(root="./data/val", transform=transform)
+    # stratified split
+    labels_np = np.array(labels)
+    n_total = len(indices)
+    n_val = int(round(val_ratio * n_total))
+    # simple stratified split
+    from sklearn.model_selection import StratifiedShuffleSplit
+    sss = StratifiedShuffleSplit(n_splits=1, test_size=n_val, random_state=42)
+    train_idx, val_idx = next(sss.split(indices, labels_np))
 
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+    if HAS_CUSTOM_DS:
+        train_ds = Subset(full, train_idx.tolist())
+        val_ds = Subset(full, val_idx.tolist())
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+        val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    else:
+        train_ds = Subset(full, train_idx.tolist())
+        val_ds   = Subset(full, val_idx.tolist())
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+        val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
-    # ----------------------------
-    # Model setup
-    # ----------------------------
-    model = DualBranchSwinCNNClassifier(num_classes=args.num_classes, pretrained=True).to(device)
+    # class counts on training set
+    binc = np.bincount(labels_np[train_idx], minlength=2)
+    return train_loader, val_loader, (len(train_idx), len(val_idx)), binc
 
-    # Teacher model (if distillation)
-    teacher_model = None
-    if args.teacher_path:
-        if DualBranchSwinTinyClassifier is not None:
-            teacher_model = DualBranchSwinTinyClassifier(num_classes=args.num_classes, pretrained=False).to(device)
+# ------- class weights for imbalance -------
+def class_weights_from_counts(counts):
+    # inverse frequency
+    counts = counts.astype(np.float32)
+    counts[counts == 0] = 1.0
+    w = counts.sum() / (2.0 * counts)
+    return torch.tensor(w, dtype=torch.float32)
+
+# ------- training / evaluation -------
+def train_one_epoch(model, loader, device, criterion, optimizer):
+    model.train()
+    losses = []
+    for batch in loader:
+        optimizer.zero_grad()
+        if HAS_CUSTOM_DS:
+            x_std, x_clahe, y = batch
+            x_std, x_clahe, y = x_std.to(device), x_clahe.to(device), y.to(device)
+            logits = model(x_std, x_clahe)
         else:
-            teacher_model = DualBranchSwinCNNClassifier(num_classes=args.num_classes, pretrained=False).to(device)
-        checkpoint = torch.load(args.teacher_path, map_location=device)
-        teacher_model.load_state_dict(checkpoint.get('model_state_dict', checkpoint))
-        teacher_model.eval()
-        for p in teacher_model.parameters():
-            p.requires_grad = False
+            x, y = batch
+            x, y = x.to(device), y.to(device)
+            logits = model(x)
+        loss = criterion(logits, y)
+        loss.backward()
+        optimizer.step()
+        losses.append(loss.item())
+    return float(np.mean(losses)) if losses else 0.0
 
-    criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+@torch.no_grad()
+def evaluate(model, loader, device, criterion):
+    model.eval()
+    losses, correct, total = [], 0, 0
+    for batch in loader:
+        if HAS_CUSTOM_DS:
+            x_std, x_clahe, y = batch
+            x_std, x_clahe, y = x_std.to(device), x_clahe.to(device), y.to(device)
+            logits = model(x_std, x_clahe)
+        else:
+            x, y = batch
+            x, y = x.to(device), y.to(device)
+            logits = model(x)
+        loss = criterion(logits, y)
+        losses.append(loss.item())
+        preds = logits.argmax(dim=1)
+        correct += (preds == y).sum().item()
+        total += y.numel()
+    acc = correct / max(total, 1)
+    return (float(np.mean(losses)) if losses else 0.0), acc
 
-    # ----------------------------
-    # Training loop
-    # ----------------------------
-    for epoch in range(args.epochs):
-        model.train()
-        for images, labels in train_loader:
-            images, labels = images.to(device), labels.to(device)
-            optimizer.zero_grad()
-            outputs = model(images)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", type=str, required=True, help="Path to preprocessed dataset (two folders: algae/ microplastics/)")
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--output_model", type=str, default="classifier.pth")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
 
-            if teacher_model is not None:
-                with torch.no_grad():
-                    teacher_outputs = teacher_model(images)
-                T = args.kd_temperature
-                soft_loss = F.kl_div(
-                    F.log_softmax(outputs / T, dim=1),
-                    F.softmax(teacher_outputs / T, dim=1),
-                    reduction='batchmean'
-                ) * (T * T)
-                hard_loss = criterion(outputs, labels)
-                loss = args.kd_alpha * soft_loss + (1 - args.kd_alpha) * hard_loss
-            else:
-                loss = criterion(outputs, labels)
+    set_seed(args.seed)
+    data_dir = Path(args.data)
+    assert data_dir.exists(), f"Data path not found: {data_dir}"
 
-            loss.backward()
-            optimizer.step()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        print(f"Epoch {epoch+1} completed.")
+    # data
+    train_loader, val_loader, (n_tr, n_val), binc = make_loaders(data_dir, batch_size=args.batch_size)
+    print(f"Train set: {n_tr} images (class counts: {binc.tolist()})")
+    print(f"Val set:   {n_val} images")
 
-    # ----------------------------
-    # Optional pruning
-    # ----------------------------
-    if args.prune_fraction > 0:
-        model.eval()
-        for name, module in model.named_modules():
-            if isinstance(module, torch.nn.Conv2d) or isinstance(module, torch.nn.Linear):
-                prune.l1_unstructured(module, name='weight', amount=args.prune_fraction)
-                prune.remove(module, 'weight')
-        print(f"Pruned {args.prune_fraction*100:.0f}% of weights in Conv2d/Linear layers.")
+    # model
+    ModelClass, picked = resolve_model_class()
+    print(f"Using model: {picked}")
+    # most of our lightweight classifiers take num_classes=2 and optionally freeze_backbone
+    try:
+        model = ModelClass(num_classes=2, freeze_backbone=True)
+    except TypeError:
+        # fallback to only num_classes
+        model = ModelClass(num_classes=2)
+    model.to(device)
 
-    torch.save(model.state_dict(), args.output_model)
+    # loss (weighted CE for imbalance)
+    w = class_weights_from_counts(binc).to(device)
+    criterion = nn.CrossEntropyLoss(weight=w)
 
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
+
+    best_acc = -1.0
+    out_path = Path(args.output_model)
+
+    for epoch in range(1, args.epochs + 1):
+        tr_loss = train_one_epoch(model, train_loader, device, criterion, optimizer)
+        val_loss, val_acc = evaluate(model, val_loader, device, criterion)
+        print(f"[epoch {epoch}] train_loss={tr_loss:.4f}  val_loss={val_loss:.4f}  val_acc={val_acc:.3f}")
+
+        if val_acc > best_acc:
+            best_acc = val_acc
+            torch.save(model.state_dict(), out_path)
+            print(f"  ↳ New best. Saved to {out_path.resolve()}")
+
+    # write a small training summary
+    summary = {
+        "data": str(data_dir),
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "lr": args.lr,
+        "best_val_acc": best_acc,
+        "model_class": picked,
+        "class_counts_train": binc.tolist(),
+    }
+    (Path("results")).mkdir(exist_ok=True)
+    with open(Path("results") / "train_summary.json", "w") as f:
+        json.dump(summary, f, indent=2)
+    print("Saved results/train_summary.json")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--num_classes', type=int, default=2, help='Number of target classes')
-    parser.add_argument('--epochs', type=int, default=20, help='Training epochs')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--teacher_path', type=str, default=None, help='Path to teacher model weights for distillation')
-    parser.add_argument('--kd_alpha', type=float, default=0.5, help='Blend factor for distillation loss vs true loss')
-    parser.add_argument('--kd_temperature', type=float, default=4.0, help='Temperature for softening logits in distillation')
-    parser.add_argument('--prune_fraction', type=float, default=0.0, help='Fraction of weights to prune after training (0 to disable)')
-    parser.add_argument('--output_model', type=str, default='student_model.pth', help='Path to save the trained model')
-    args = parser.parse_args()
-    train_model(args)
+    main()
