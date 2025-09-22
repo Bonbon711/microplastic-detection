@@ -1,0 +1,21 @@
+# Python/venv
+.venv/
+__pycache__/
+*.pyc
+
+# Data & outputs
+data/
+data_balanced/
+outputs/
+runs/
+checkpoints/
+
+# Large artifacts
+*.pth
+*.pt
+*.onnx
+*.onnx.tar
+*.zip
+*.7z
+*.rar
+*.mp4
