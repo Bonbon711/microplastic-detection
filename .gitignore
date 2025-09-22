@@ -1,16 +1,16 @@
-# Python/venv
-.venv/
+﻿# Python & env
 __pycache__/
 *.pyc
+.venv/
 
-# Data & outputs
+# Data & outputs (DO NOT push)
 data/
 data_balanced/
 outputs/
 runs/
 checkpoints/
 
-# Large artifacts
+# Model weights & large artifacts
 *.pth
 *.pt
 *.onnx
