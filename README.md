@@ -58,7 +58,7 @@ python src\augment_balance.py --input .\data --outdir .\data_balanced --class al
 python src/preprocess.py --input "./data_balanced" --outdir "./data_preprocessed" --keep-structure --size 224
 
 4. Train
-python train.py --data ./data_preprocessed --epochs 20 --batch 16 --lr 0.0002
+python src/train.py --data ./data_preprocessed --epochs 20 --batch 16 --lr 0.0002
 
 5. Metrics & Evaluation
 # Full dataset evaluation
@@ -68,7 +68,7 @@ python src/metrics.py --data "./data_preprocessed" --weights "classifier.pth" --
 #Using the internal validation split
 python src/metrics.py --data ./data_preprocessed --weights classifier.pth --use_split --outdir results --csv
 #Evaluate on an external test set
-python metrics.py --data ./path_to_test_set --weights classifier.pth --outdir results --csv
+python src/metrics.py --data ./path_to_test_set --weights classifier.pth --outdir results --csv
 
 6. Detection 
 # For a single image file:
