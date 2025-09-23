@@ -1,50 +1,62 @@
 import torch
 import torch.nn as nn
-from torchvision import models
-import timm
+from torchvision.models import resnet18, ResNet18_Weights
+from timm import create_model
 
 class DualBranchSwinCNNClassifier(nn.Module):
-    """
-    Dual-branch classifier with one Swin Transformer (global features)
-    and one CNN (ResNet18) branch (local features). Outputs class logits.
-    """
-    def __init__(self, num_classes, pretrained=True):
-        super(DualBranchSwinCNNClassifier, self).__init__()
-        # Swin Transformer Tiny branch (pretrained on ImageNet)
-        self.swin = timm.create_model('swin_tiny_patch4_window7_224', 
-                                      pretrained=pretrained, num_classes=0)
-        # CNN branch: ResNet18 (pretrained on ImageNet)
-        self.cnn = models.resnet18(pretrained=pretrained)
-        # Remove ResNet18's final FC layer to use as feature extractor
+    def __init__(self, num_classes=2, pretrained=True):
+        super().__init__()
+
+        # CNN (ResNet18)
+        self.cnn = resnet18(weights=ResNet18_Weights.DEFAULT if pretrained else None)
         self.cnn.fc = nn.Identity()
-        # Feature dimensions from each branch
-        swin_feat_dim = getattr(self.swin, 'num_features', 768)  # Swin-Tiny output dim (~768)
-        cnn_feat_dim = 512  # ResNet18 output dim after global pooling
-        # Classification head on concatenated features
-        self.fc = nn.Linear(swin_feat_dim + cnn_feat_dim, num_classes)
+        self.swin = create_model("swin_tiny_patch4_window7_224", pretrained=pretrained)
+        self.swin.head = nn.Identity()
+        self.swin_pool = nn.AdaptiveAvgPool2d(1)
+
+        # infer fused width and build head
+        in_features = self._infer_fused_dim()
+        self.fc = nn.Linear(in_features, num_classes)
+
+    def _swin_feats(self, x):
+        if hasattr(self.swin, "forward_features"):
+            f = self.swin.forward_features(x)
+        else:
+            f = self.swin(x)
+        if f.ndim == 4:     # [B,C,H,W]
+            f = self.swin_pool(f).flatten(1)
+        elif f.ndim == 3:   # [B,N,C]
+            f = f.mean(dim=1)
+        return f            # [B,C]
+
+    @torch.no_grad()
+    def _infer_fused_dim(self):
+        self.eval()
+        dummy = torch.zeros(1, 3, 224, 224)
+        c = self.cnn(dummy)            # [1,C1]
+        s = self._swin_feats(dummy)    # [1,C2]
+        return c.shape[1] + s.shape[1]
 
     def forward(self, x):
-        # **Swin Transformer branch** – get feature map and global pool
-        swin_featmap = self.swin.forward_features(x)       # shape [B, H, W, C] for Swin
-        if swin_featmap.dim() == 4 and swin_featmap.shape[1] != getattr(self.swin, 'num_features', swin_featmap.shape[-1]):
-            # If output is [B, H, W, C], permute to [B, C, H, W]
-            swin_featmap = swin_featmap.permute(0, 3, 1, 2)
-        swin_vec = swin_featmap.mean(dim=(2, 3))           # global average pool -> [B, C]
+        c = self.cnn(x)
+        s = self._swin_feats(x)
+        return self.fc(torch.cat([c, s], dim=1))
 
-        # **CNN branch (ResNet18)** – forward to get final conv feature map
-        x_cnn = self.cnn.conv1(x)
-        x_cnn = self.cnn.bn1(x_cnn)
-        x_cnn = self.cnn.relu(x_cnn)
-        x_cnn = self.cnn.maxpool(x_cnn)
-        x_cnn = self.cnn.layer1(x_cnn)
-        x_cnn = self.cnn.layer2(x_cnn)
-        x_cnn = self.cnn.layer3(x_cnn)
-        x_cnn = self.cnn.layer4(x_cnn)                    # final conv feature map [B, 512, H_c, W_c]
-        cnn_vec = x_cnn.mean(dim=(2, 3))                  # global average pool -> [B, 512]
+class DualBranchSwinTinyClassifier(nn.Module):
+    def __init__(self, num_classes=2, pretrained=True):
+        super().__init__()
+        self.swin = create_model("swin_tiny_patch4_window7_224", pretrained=pretrained)
+        self.swin.head = nn.Identity()
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        with torch.no_grad():
+            d = torch.zeros(1,3,224,224)
+            f = self.swin.forward_features(d) if hasattr(self.swin,"forward_features") else self.swin(d)
+            if f.ndim == 4: f = self.pool(f).flatten(1)
+            elif f.ndim == 3: f = f.mean(dim=1)
+        self.fc = nn.Linear(f.shape[1], num_classes)
 
-        # **Feature fusion and classification**
-        combined_feat = torch.cat([swin_vec, cnn_vec], dim=1)
-        logits = self.fc(combined_feat)
-        return logits
-
-    # (Optional) A helper method could be added to retrieve feature maps for CAM if needed.
+    def forward(self, x):
+        f = self.swin.forward_features(x) if hasattr(self.swin,"forward_features") else self.swin(x)
+        if f.ndim == 4: f = self.pool(f).flatten(1)
+        elif f.ndim == 3: f = f.mean(dim=1)
+        return self.fc(f)

@@ -1,25 +1,34 @@
-from pathlib import Path
+# src/optimize.py
+import argparse
 import torch
 import torch.nn as nn
+from torch.ao.quantization import quantize_dynamic
 from model import DualBranchSwinTinyClassifier
 
-ROOT = Path(__file__).resolve().parents[1]
-CKPT_IN  = ROOT / "classifier.pth"
-CKPT_OUT = ROOT / "classifier_optimized.pt"
+def quantize_and_save(weights_path, output_path, num_classes=2):
+    # Initialize model without freeze_backbone (not supported)
+    model = DualBranchSwinTinyClassifier(num_classes=num_classes, pretrained=False)
+    state_dict = torch.load(weights_path, map_location="cpu")
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    # Quantize only Linear layers
+    model_quantized = quantize_dynamic(
+        model, {nn.Linear}, dtype=torch.qint8
+    )
+
+    # Save quantized model
+    torch.save(model_quantized.state_dict(), output_path)
+    print(f"Quantized model saved at {output_path}")
 
 def main():
-    model = DualBranchSwinTinyClassifier(num_classes=2, freeze_backbone=False)
-    if CKPT_IN.exists():
-        model.load_state_dict(torch.load(CKPT_IN, map_location="cpu"))
-        print(f"Loaded {CKPT_IN}")
-    else:
-        print("WARNING: classifier.pth not found; using random weights")
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--weights', type=str, required=True, help="Path to trained weights")
+    parser.add_argument('--output', type=str, default="quantized_model.pth", help="Output path for quantized model")
+    parser.add_argument('--num_classes', type=int, default=2)
+    args = parser.parse_args()
 
-    model.eval()
-    # Dynamic quantization for linear layers only (safe on CPU)
-    q_model = torch.quantization.quantize_dynamic(model, {nn.Linear}, dtype=torch.qint8)
-    torch.save(q_model.state_dict(), CKPT_OUT)
-    print(f"Saved optimized (quantized) weights to {CKPT_OUT}")
+    quantize_and_save(args.weights, args.output, num_classes=args.num_classes)
 
 if __name__ == "__main__":
     main()

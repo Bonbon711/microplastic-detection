@@ -1,85 +1,77 @@
-# Microplastic Detection with Lightweight Swin Transformer
+# Microplastic Detection (Thesis)
 
-This project implements a **Lightweight Swin Transformer** for detecting and classifying **microplastics vs algae** in microscopic images.  
-It supports data preprocessing, augmentation, model training, evaluation, and inference.
+Lightweight **ResNet18 + Swin Transformer Tiny** hybrid classifier for **Algae vs Microplastics** detection.  
+Pipeline: **Balance → Preprocess → Train → Metrics → Detect → Export → Optimize.
 
 ---
 
-## 📂 Project Structure
-
+## 📂 Project Directory
 microplastic-detection/
 │
-├── data/ # Raw dataset (algae/, microplastics/)
-├── data_resized/ # Resized images (output of resize.py)
-├── data_augmented/ # Augmented & balanced dataset (output of augment_balance.py)
-├── data_preprocessed/ # Final preprocessed dataset (output of preprocess.py)
-│
-├── src/ # Core source code
-│ ├── dataset.py # Dataset loader definitions
-│ ├── preprocess.py # Preprocessing & cleaning pipeline
-│ ├── augment_balance.py# Augments algae images to balance dataset
-│ ├── model.py # Lightweight Swin Transformer model
-│ ├── train.py # Training loop
-│ ├── metrics.py # Evaluation & metrics reporting
-│ ├── detect.py # Detection/visualization on new images
-│ ├── optimize.py # Model optimization/export
-│ ├── export.py # Export utilities (ONNX, TorchScript)
-│
-├── results/ # Metrics, confusion matrices, saved predictions
-├── classifier.pth # Trained model weights (after train.py)
-├── requirements.txt # Python dependencies
-└── README.md # Documentation (this file)
-
+├─ data/ # raw dataset (train/val split or unsplit)
+├─ data_balanced/ # balanced dataset (after augment_balance.py)
+├─ data_preprocessed/ # preprocessed dataset (resized & normalized)
+├─ results/ # metrics reports, confusion matrix, detections
+├─ src/ # source code
+│ ├─ augment_balance.py
+│ ├─ dataset.py
+│ ├─ detect.py
+│ ├─ export.py
+│ ├─ metrics.py
+│ ├─ model.py
+│ ├─ optimize.py
+│ ├─ preprocess.py
+│ └─ train.py
+├─ requirements.txt
+└─ README.md
 
 ---
 
-## ⚙️ Installation
+## ⚙️ 1. Environment Setup (PowerShell)
 
-1. Clone repository and create virtual environment:
-
-```bash
-git clone <your-repo-url>
-cd microplastic-detection
+```powershell
+# Create virtual environment
 python -m venv .venv
-.venv\Scripts\activate   # (Windows PowerShell)
+
+# Activate venv
+.\.venv\Scripts\Activate.ps1
+
+# Upgrade pip
 pip install --upgrade pip
+
+# Install dependencies
 pip install -r requirements.txt
 
-## ⚙️ Dataset Preparation
-1. Place raw data into 
-data/
-  ├── algae/
-  ├── microplastics/
+# Fix execution policy if activation fails
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 
-2. Balance dataset
-python src\augment_balance.py --input .\data --outdir .\data_balanced --class algae --target 50 --use_clahe
+# Balance "algae" class up to 200 images
+python src\augment_balance.py --input .\data --outdir .\data_balanced --class algae --target 200 --use_clahe
 
-3.Preprocess
-python src/preprocess.py --input "./data_balanced" --outdir "./data_preprocessed" --keep-structure --size 224
+# Balance "microplastics" class up to 200 images
+python src\augment_balance.py --input .\data --outdir .\data_balanced --class microplastics --target 200 --use_clahe
 
-4. Train
-python src/train.py --data ./data_preprocessed --epochs 20 --batch 16 --lr 0.0002
+# Resize to 224x224, normalize, output into data_preprocessed/
+python src\preprocess.py --input .\data_balanced --output .\data_preprocessed --resize 224
 
-5. Metrics & Evaluation
-# Full dataset evaluation
-python src/metrics.py --data "./data_preprocessed" --weights "classifier.pth" --csv
-# Deterministic 80/20 split (recommended for thesis)
-python src/metrics.py --data "./data_preprocessed" --weights "classifier.pth" --use_split --csv
-#Using the internal validation split
-python src/metrics.py --data ./data_preprocessed --weights classifier.pth --use_split --outdir results --csv
-#Evaluate on an external test set
-python src/metrics.py --data ./path_to_test_set --weights classifier.pth --outdir results --csv
+# Auto 80/20 split, 20 epochs, batch size 16, learning rate 2e-4
+python src\train.py --data .\data_preprocessed --auto_split --val_ratio 0.2 `
+    --epochs 20 --batch_size 16 --lr 2e-4 --output_model classifier.pth
 
-6. Detection 
-# For a single image file:
-python src/detect.py --input path/to/pd.jpg --weights classifier.pth --outdir results
-# For a directory of images:
-python src/detect.py --input path/to/data --weights classifier.pth --outdir results
+# Generate accuracy, precision, recall, F1 + confusion matrix
+python src\metrics.py --data .\data_preprocessed --weights classifier.pth `
+    --out .\results --class_names algae microplastics
 
-8. Optimization 
-python src/optimize.py --weights "classifier.pth"
+# Single image detection
+python src\detect.py --weights classifier.pth --source .\data\microplastics\1.jpg `
+    --output_dir .\results --bbox --cam
 
-7. Export (optional)
-python src/export.py
+# Folder detection
+python src\detect.py --weights classifier.pth --source .\data\microplastics `
+    --output_dir .\results --bbox --cam
 
+# Export trained model to ONNX
+python src\export.py --weights classifier.pth --output model.onnx
 
+# Prune 20% of model weights, save optimized version
+python src\optimize.py --weights classifier.pth --output classifier_pruned.pth --prune_fraction 0.2

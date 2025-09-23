@@ -3,7 +3,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from tqdm import tqdm
-
+ 
 def read_rgb(path: Path):
     bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if bgr is None:
