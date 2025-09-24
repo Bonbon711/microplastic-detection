@@ -17,9 +17,9 @@ def gray_world_white_balance(img_rgb):
     wb = np.clip(img*gain, 0, 255).astype(np.uint8)
     return wb
 
-def illumination_flatten(img_rgb, sigma=31):
+def illumination_flatten(img_rgb, sigma=15):
     bg = cv2.GaussianBlur(img_rgb, (0,0), sigmaX=sigma, sigmaY=sigma)
-    flat = cv2.addWeighted(img_rgb, 1.5, bg, -0.5, 128)
+    flat = cv2.addWeighted(img_rgb, 1.2, bg, -0.5, 128)
     return np.clip(flat, 0, 255).astype(np.uint8)
 
 def clahe_on_v(img_rgb, clip=2.0, tile=8):
@@ -32,7 +32,7 @@ def clahe_on_v(img_rgb, clip=2.0, tile=8):
 def denoise_soft(img_rgb):
     return cv2.fastNlMeansDenoisingColored(img_rgb, None, 3, 3, 7, 21)
 
-def contrast_stretch(img_rgb, low=1, high=99):
+def contrast_stretch(img_rgb, low=2, high=98):
     prc1 = np.percentile(img_rgb, low)
     prc2 = np.percentile(img_rgb, high)
     out = np.clip((img_rgb - prc1) * (255.0/(prc2 - prc1 + 1e-6)), 0, 255)
