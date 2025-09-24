@@ -47,7 +47,27 @@ def process_one(img_rgb, size=224):
     x = illumination_flatten(x, sigma=31)
     x = clahe_on_v(x, clip=2.0, tile=8)
     x = denoise_soft(x)
-    x = contrast_stretch(x, 1, 99)
+    x = contrast_stretch(x, 2, 98)  # safer stretch
+
+    # --- safety check ---
+    mean_val = x.mean()
+    if mean_val < 5 or mean_val > 250:
+        print(f"[AUTO-CORRECT] mean={mean_val:.2f}, adjusting...")
+
+        # Retry with gentler settings
+        x = resize_image(img_rgb, size=size)
+        x = gray_world_white_balance(x)
+        x = illumination_flatten(x, sigma=15)   # gentler flatten
+        x = clahe_on_v(x, clip=1.5, tile=8)     # softer CLAHE
+        x = denoise_soft(x)
+        x = contrast_stretch(x, 5, 95)          # safer contrast
+
+        # If still broken, fall back to original resized
+        mean_val2 = x.mean()
+        if mean_val2 < 5 or mean_val2 > 250:
+            print(f"[FALLBACK] mean={mean_val2:.2f}, using original resized image.")
+            x = resize_image(img_rgb, size=size)
+
     return x
 
 def main():
