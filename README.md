@@ -1,11 +1,12 @@
 # Microplastic Detection (Thesis)
 
 Lightweight **ResNet18 + Swin Transformer Tiny** hybrid classifier for **Algae vs Microplastics** detection.  
-Pipeline: **Balance → Preprocess → Train → Metrics → Detect → Export → Optimize.
+Pipeline: \*\*Balance → Preprocess → Train → Metrics → Detect → Export → Optimize.
 
 ---
 
 ## 📂 Project Directory
+
 microplastic-detection/
 │
 ├─ data/ # raw dataset (train/val split or unsplit)
@@ -46,13 +47,14 @@ pip install -r requirements.txt
 Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 
 # Balance "algae" class up to 200 images
-python src\augment_balance.py --input .\data --outdir .\data_balanced --class algae --target 200 --use_clahe
+python src\augment_balance.py --input .\data --outdir .\data_balanced --class algae --target 840 --use_clahe
 
 # Balance "microplastics" class up to 200 images
-python src\augment_balance.py --input .\data --outdir .\data_balanced --class microplastics --target 200 --use_clahe
+python src\augment_balance.py --input .\data --outdir .\data_balanced --class microplastics --target 840 --use_clahe
 
-# Resize to 224x224, normalize, output into data_preprocessed/
-python src\preprocess.py --input .\data_balanced --output .\data_preprocessed --resize 224
+#changed it to this
+python src\preprocess.py --input .\data_balanced --outdir .\data_preprocessed --size 224 --keep-structure
+
 
 # Auto 80/20 split, 20 epochs, batch size 16, learning rate 2e-4
 python src\train.py --data .\data_preprocessed --auto_split --val_ratio 0.2 `
@@ -75,3 +77,4 @@ python src\export.py --weights classifier.pth --output model.onnx
 
 # Prune 20% of model weights, save optimized version
 python src\optimize.py --weights classifier.pth --output classifier_pruned.pth --prune_fraction 0.2
+```

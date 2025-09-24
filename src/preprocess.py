@@ -17,9 +17,9 @@ def gray_world_white_balance(img_rgb):
     wb = np.clip(img*gain, 0, 255).astype(np.uint8)
     return wb
 
-def illumination_flatten(img_rgb, sigma=31):
+def illumination_flatten(img_rgb, sigma=15):
     bg = cv2.GaussianBlur(img_rgb, (0,0), sigmaX=sigma, sigmaY=sigma)
-    flat = cv2.addWeighted(img_rgb, 1.5, bg, -0.5, 128)
+    flat = cv2.addWeighted(img_rgb, 1.2, bg, -0.5, 128)
     return np.clip(flat, 0, 255).astype(np.uint8)
 
 def clahe_on_v(img_rgb, clip=2.0, tile=8):
@@ -32,7 +32,7 @@ def clahe_on_v(img_rgb, clip=2.0, tile=8):
 def denoise_soft(img_rgb):
     return cv2.fastNlMeansDenoisingColored(img_rgb, None, 3, 3, 7, 21)
 
-def contrast_stretch(img_rgb, low=1, high=99):
+def contrast_stretch(img_rgb, low=2, high=98):
     prc1 = np.percentile(img_rgb, low)
     prc2 = np.percentile(img_rgb, high)
     out = np.clip((img_rgb - prc1) * (255.0/(prc2 - prc1 + 1e-6)), 0, 255)
@@ -47,7 +47,27 @@ def process_one(img_rgb, size=224):
     x = illumination_flatten(x, sigma=31)
     x = clahe_on_v(x, clip=2.0, tile=8)
     x = denoise_soft(x)
-    x = contrast_stretch(x, 1, 99)
+    x = contrast_stretch(x, 2, 98)  # safer stretch
+
+    # --- safety check ---
+    mean_val = x.mean()
+    if mean_val < 5 or mean_val > 250:
+        print(f"[AUTO-CORRECT] mean={mean_val:.2f}, adjusting...")
+
+        # Retry with gentler settings
+        x = resize_image(img_rgb, size=size)
+        x = gray_world_white_balance(x)
+        x = illumination_flatten(x, sigma=15)   # gentler flatten
+        x = clahe_on_v(x, clip=1.5, tile=8)     # softer CLAHE
+        x = denoise_soft(x)
+        x = contrast_stretch(x, 5, 95)          # safer contrast
+
+        # If still broken, fall back to original resized
+        mean_val2 = x.mean()
+        if mean_val2 < 5 or mean_val2 > 250:
+            print(f"[FALLBACK] mean={mean_val2:.2f}, using original resized image.")
+            x = resize_image(img_rgb, size=size)
+
     return x
 
 def main():
